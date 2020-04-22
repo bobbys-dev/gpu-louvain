@@ -1,25 +1,76 @@
 /*
 This is the central piece of code. This file implements a class
 (interface in gpucommunity.hpp) that takes data in on the cpu side, copies
-it to the gpu, and exposes functions (increment and retreive) that let
+it to the gpu, and exposes functions (ie compute value of modularity delta) that let
 you perform actions with the GPU
-This class will get translated into python via swig
+This class will get translated into python via cython
+
+CUDA C/C++ keyword __global__ indicates a function that runs on device, but is called from host code. Host launches a kernel
+
 */
 
-#include <gpucommunity.cu>
-#include <gpuadder.hpp>
+#include <gpucommunity.hpp>
 #include <assert.h>
 #include <iostream>
+#include "kernel.cu"
+
 using namespace std;
 
-GPUCommunity::GPUCommunity (int* array_host_, int length_) {
-  array_host = array_host_;
-  length = length_;
+static const int THREADS_PER_BLOCK = 512;
+
+GPUCommunity::GPUCommunity (int* array_host_, int length_, const int nodes_count, int node_communities[], int node_degrees[], int communities_sum_incidents[], int communities_sum_inside[], const int csr_nnz, const int csr_num_rows, int csr_data[], int csr_indices[], int csr_indptr[], int sum_all_weights) {
+  /*
+  Initialize all member variables including:
+  nodes, sum of weights incident to nodes, community ids, sum of weights inside communities, sum of weights internal to community, sum of all graph weights, 
+  and compressed sparse row (CSR) matrix for adjacency matrix 
+  */
+  array_host = array_host_; // TODO: why ferry this array?
+  length = length_;  // TODO: why ferry this value?
   int size = length * sizeof(int);
-  cudaError_t err = cudaMalloc((void**) &array_device, size);
-  assert(err == 0);
+  cudaError_t err = cudaMalloc((void**) &array_device, size); // debug
+  assert(err == 0); // assert cudaSuccess
   err = cudaMemcpy(array_device, array_host, size, cudaMemcpyHostToDevice);
-  assert(err == 0);
+  assert(err == 0); 
+
+  this->nodes_count = nodes_count; // number of nodes
+  this->sum_all_weights = sum_all_weights; // sum all weights in graph
+  this->csr_nnz = csr_nnz; //non-zero values in compressed matrix
+  this->csr_num_rows = csr_num_rows; // number of rows in original adjacency matrix
+  this->node_communities = node_communities;
+  this->node_degrees = node_degrees;
+  this->communities_sum_incidents = communities_sum_incidents;
+  this->communities_sum_inside = communities_sum_inside;
+  this->csr_data = csr_data;
+  this->csr_indices = csr_indices;
+  this->csr_indptr = csr_indptr;
+
+  printf("[+]State inited to:================\n");
+  printState();
+  
+
+  // nodes community assignments
+  if (cudaSuccess != cudaMalloc((void**)&d_node_communities, sizeof(int)*nodes_count)) {fprintf(stderr, "ERROR: could not allocate community memory\n"); exit(-1);}
+  
+  // sum of links incident to node 
+  if (cudaSuccess != cudaMalloc((void**)&d_node_degrees, sizeof(int)*nodes_count)) {fprintf(stderr, "ERROR: could not allocate node memory\n"); exit(-1);}
+
+  // sum of weights incident to community
+  if (cudaSuccess != cudaMalloc((void**)&d_communities_sum_incidents, sizeof(int)*nodes_count)) {fprintf(stderr, "ERROR: could not allocate community memory\n"); exit(-1);}
+  
+  // sum of weights inside communities
+  if (cudaSuccess != cudaMalloc((void**)&d_communities_sum_inside, sizeof(int)*nodes_count)) {fprintf(stderr, "ERROR: could not allocate community memory\n"); exit(-1);}
+
+  // compressed sparse row matrix and graph state
+   if (cudaSuccess != cudaMalloc((void**)&d_csr_data, sizeof(int)*csr_nnz)) {fprintf(stderr, "ERROR: could not allocate CSR data in memory\n"); exit(-1);}
+  
+  if (cudaSuccess != cudaMalloc((void**)&d_csr_indices, sizeof(int)*csr_nnz)) {fprintf(stderr, "ERROR: could not allocate CSR data in memory\n"); exit(-1);}
+
+  // size of number of rows + 1 because nnz is at the end
+  if (cudaSuccess != cudaMalloc((void**)&d_csr_indptr, sizeof(int)*(csr_num_rows+1))) {fprintf(stderr, "ERROR: could not allocate CSR data in memory\n"); exit(-1);}
+
+  // shared sum of all link weights
+  if (cudaSuccess != cudaMalloc((void**)&d_sum_all_weights, sizeof(int))) {fprintf(stderr, "ERROR: could not allocate graph state memory\n"); exit(-1);}
+  
 }
 
 void GPUCommunity::increment() {
@@ -28,21 +79,143 @@ void GPUCommunity::increment() {
   assert(err == 0);
 }
 
-void GPUCommunity::retreive() {
-  int size = length * sizeof(int);
-  cudaMemcpy(array_host, array_device, size, cudaMemcpyDeviceToHost);
-  cudaError_t err = cudaGetLastError();
-  if(err != 0) { cout << err << endl; assert(0); }
+void GPUCommunity::printState() {
+  
+    printf("[+]Nodes count: %d\n",nodes_count);
+//    printf("csr_nnz: %d:\n",csr_nnz);
+//    printf("csr_num_rows: %d\n",csr_num_rows);
+//    printf("sum weights in graph: %d\n",sum_all_weights);
+
+    printf("\n[+]Node:community assignments:\n");
+    for (int i = 0; i < nodes_count; i++) {
+        printf("%d:%d, ", i, node_communities[i]);
+    }
+    
+    printf("\n[+]Node degrees:\n");
+    for (int i = 0; i < nodes_count; i++) {
+        printf("%d ",this->node_degrees[i]);
+    }
+    
+    printf("\n[+]Sum of weights incident to communities:\n");
+    for (int i = 0; i < nodes_count; i++) {
+        printf("%d ",communities_sum_incidents[i]);
+    }
+
+//    printf("\n[+]Sum of weights internal to community:\n");   
+//    for (int i = 0; i < nodes_count; i++) {
+//        printf("%d ",communities_sum_inside[i]);
+//    }
+//    
+//    printf("\n[+]CSR data:\n");
+//    for (int i = 0; i < csr_nnz; i++) {
+//        printf("%d ",csr_data[i]);
+//    }
+//    printf("\n[+]CSR indices:\n");
+//    for (int i = 0; i < csr_nnz; i++) {
+//        printf("%d ",csr_indices[i]);
+//    }
+//    
+//    // 0 to nnz+1 because nnz value is appended in indptr array
+//    printf("\n[+]CSR index pointer:\n");
+//    for (int i = 0; i <= csr_num_rows ; i++) {
+//        printf("%d ",csr_indptr[i]);
+//    }
+    
+    printf("\n\n");
+
+}
+void GPUCommunity::getMaxDelta (double* max, int* node, int* community) {
+    /*
+    This method internal state of nodes and communities and computes delta modularity. Kernel needs node community assignments, community weight info, adjacency info. Each loop there will bee a best node and best assignment
+    Invariant: node (and its state) for which deltas are being computed
+    Input: array of communities
+    Output: community reassignment that will lead to max delta
+    */
+    printf("\n[+]state before getting max delta========\n");
+    printState();
+    
+    int best_node;
+    int* d_best_node;
+    int best_community;
+    int* d_best_community;
+    double max_delta = 0;
+    double* d_max_delta;
+
+    // allocate a global device variables that will hold best node and best corresponding community assignment. These variables are paired and shouldn't be treated separate
+    if (cudaSuccess != cudaMalloc((void **)&d_best_node, sizeof(int))) {fprintf(stderr, "ERROR: could not allocate memory\n"); exit(-1);}
+
+    if (cudaSuccess != cudaMalloc((void **)&d_best_community, sizeof(int))) {fprintf(stderr, "ERROR: could not allocate memory\n"); exit(-1);}
+    
+    if (cudaSuccess != cudaMalloc((void **)&d_max_delta, sizeof(double))) {fprintf(stderr, "ERROR: could not allocate memory\n"); exit(-1);}
+
+    if (cudaSuccess != cudaMemcpy(d_max_delta, &max_delta, sizeof(double), cudaMemcpyHostToDevice)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
+
+    // TODO: eval if these vals and arrays can be allocated during initialization
+    //if (cudaSuccess != cudaMemcpy(d_sum_all_weights, sum_all_weights, sizeof(int), cudaMemcpyHostToDevice)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
+
+    if (cudaSuccess != cudaMemcpy(d_node_degrees, node_degrees, sizeof(int)*nodes_count, cudaMemcpyHostToDevice)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
+
+    if (cudaSuccess != cudaMemcpy(d_csr_data, csr_data, sizeof(int)*csr_nnz, cudaMemcpyHostToDevice)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
+
+    if (cudaSuccess != cudaMemcpy(d_csr_indices, csr_indices, sizeof(int)*csr_nnz, cudaMemcpyHostToDevice)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
+
+    if (cudaSuccess != cudaMemcpy(d_csr_indptr, csr_indptr, sizeof(int)*(csr_num_rows+1), cudaMemcpyHostToDevice)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
+    
+    //Note: following arrays are updated each loop to device
+    
+    if (cudaSuccess != cudaMemcpy(d_node_communities, node_communities, sizeof(int)*nodes_count, cudaMemcpyHostToDevice)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
+    
+    if (cudaSuccess != cudaMemcpy(d_communities_sum_incidents, communities_sum_incidents, sizeof(int)*nodes_count, cudaMemcpyHostToDevice)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
+
+    if (cudaSuccess != cudaMemcpy(d_communities_sum_inside, communities_sum_inside, sizeof(int)*nodes_count, cudaMemcpyHostToDevice)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
+    
+    kernel_compute_max_delta<<<(nodes_count + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, THREADS_PER_BLOCK>>>(nodes_count, d_node_communities, d_node_degrees, d_communities_sum_incidents,  d_communities_sum_inside, csr_nnz, csr_num_rows, d_csr_data, d_csr_indices, d_csr_indptr, sum_all_weights, d_best_node, d_best_community, d_max_delta);
+    
+    if (cudaSuccess != cudaMemcpy(&best_node, d_best_node, sizeof(int), cudaMemcpyDeviceToHost)) {fprintf(stderr, "ERROR: copying to host failed\n"); exit(-1);}
+
+    if (cudaSuccess != cudaMemcpy(&best_community, d_best_community, sizeof(int), cudaMemcpyDeviceToHost)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
+    
+    if (cudaSuccess != cudaMemcpy(&max_delta, d_max_delta, sizeof(double), cudaMemcpyDeviceToHost)) {fprintf(stderr, "ERROR: copying to host failed\n"); exit(-1);}
+    
+    *node = best_node;
+    *community = best_community;
+    *max= max_delta; 
+    int i = 16;
+    i++;
+
+}
+
+void GPUCommunity::setNodeCommunities(int nc[]) {
+    //TODO: This function is not needed since we've updated in py
+    // and the pointer is the same
+    //this->node_communities = nc;
+}
+
+void GPUCommunity::retreive(void) {
+    int size = length * sizeof(int);
+    cudaMemcpy(array_host, array_device, size, cudaMemcpyDeviceToHost);
+    cudaError_t err = cudaGetLastError();
+    if(err != 0) { cout << err << endl; assert(0); }
 }
 
 void GPUCommunity::retreive_to (int* array_host_, int length_) {
-  assert(length == length_);
-  int size = length * sizeof(int);
-  cudaMemcpy(array_host_, array_device, size, cudaMemcpyDeviceToHost);
-  cudaError_t err = cudaGetLastError();
-  assert(err == 0);
+    assert(length == length_);
+    int size = length * sizeof(int);
+    cudaMemcpy(array_host_, array_device, size, cudaMemcpyDeviceToHost);
+    cudaError_t err = cudaGetLastError();
+    assert(err == 0);
 }
 
 GPUCommunity::~GPUCommunity() {
-  cudaFree(array_device);
+    cudaFree(array_device);
+    cudaFree(d_node_communities);
+    cudaFree(d_node_degrees);
+    cudaFree(d_communities_sum_incidents);
+    cudaFree(d_communities_sum_inside);
+    cudaFree(d_csr_data);
+    cudaFree(d_csr_indices);
+    cudaFree(d_csr_indptr);
+    cudaFree(d_sum_all_weights);
+  
 }
+
