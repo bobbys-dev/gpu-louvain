@@ -6,19 +6,10 @@ CPP interface file to define the GPUCommunity class. Objects of this class will 
 #define GPUCOMMUNITY_H
 
 class GPUCommunity {
-  // pointer to the GPU memory where the array is stored
-  int* array_device;
-  
-  // pointer to the CPU memory where the array is stored
-  int* array_host;
-  
-  // length of the array (number of elements)
-  int length;
- 
+
   /*
   Relevant arrays
   */
-  
 
   //nodes community assignments
   int nodes_count;
@@ -59,27 +50,15 @@ class GPUCommunity {
   int* csr_indptr;
   int* d_csr_indptr;
 
+  bool verbose; 
   
 public:
-  /* By using the default names INPLACE_ARRAY1, DIM1 in the header
-     file
-   */
 
-  GPUCommunity (int* array_host_, int length_, const int nodes_count, int node_communities[], int node_degrees[], int communities_sum_incidents[], int communities_sum_inside[], const int nnz, const int csr_num_rows, int csr_data[], int csr_indices[], int csr_indptr[], int sum_all_weights); // constructor (copies to GPU)
+  GPUCommunity (const int nodes_count, int node_communities[], int node_degrees[], int communities_sum_incidents[], int communities_sum_inside[], const int nnz, const int csr_num_rows, int csr_data[], int csr_indices[], int csr_indptr[], int sum_all_weights); // constructor (copies to GPU)
 
   ~GPUCommunity(); // destructor
   void printState();
   void getMaxDelta (double* max, int* node, int* community);
-  void increment(); // does operation inplace on the GPU
-
-  void setNodeCommunities(int nc[]);
-  
-  void retreive(); //gets results back from GPU, putting them in the memory that was passed in
-  // the constructor
-
-  //gets results back from the gpu, putting them in the supplied memory location
-  void retreive_to (int* INPLACE_ARRAY1, int DIM1);
-
 
 };
 

@@ -6,8 +6,11 @@ To install:
 
 `$ python setup.py install`
 
-to test:
+Install these in a virtual environment:
+`$ pip install requirements.txt` 
+
+Test:
 
 `$ pytest test.py`
 
-you need a relatively recent version of cython (>=0.16).
+you need a relatively recent version of cython (>=0.16) and CUDA sm_35

@@ -1,0 +1,5 @@
+Cython==0.29.15
+networkx==2.4
+numpy==1.18.1
+pytest==5.3.5
+scipy==1.4.1

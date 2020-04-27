@@ -18,20 +18,22 @@ using namespace std;
 
 static const int THREADS_PER_BLOCK = 512;
 
-GPUCommunity::GPUCommunity (int* array_host_, int length_, const int nodes_count, int node_communities[], int node_degrees[], int communities_sum_incidents[], int communities_sum_inside[], const int csr_nnz, const int csr_num_rows, int csr_data[], int csr_indices[], int csr_indptr[], int sum_all_weights) {
+static void CheckCuda() {
+  cudaError_t e;
+  cudaDeviceSynchronize();
+  if (cudaSuccess != (e = cudaGetLastError())) {
+    fprintf(stderr, "CUDA error %d: %s\n", e, cudaGetErrorString(e));
+    exit(-1);
+  }
+}
+
+GPUCommunity::GPUCommunity (const int nodes_count, int node_communities[], int node_degrees[], int communities_sum_incidents[], int communities_sum_inside[], const int csr_nnz, const int csr_num_rows, int csr_data[], int csr_indices[], int csr_indptr[], int sum_all_weights) {
   /*
   Initialize all member variables including:
   nodes, sum of weights incident to nodes, community ids, sum of weights inside communities, sum of weights internal to community, sum of all graph weights, 
   and compressed sparse row (CSR) matrix for adjacency matrix 
   */
-  array_host = array_host_; // TODO: why ferry this array?
-  length = length_;  // TODO: why ferry this value?
-  int size = length * sizeof(int);
-  cudaError_t err = cudaMalloc((void**) &array_device, size); // debug
-  assert(err == 0); // assert cudaSuccess
-  err = cudaMemcpy(array_device, array_host, size, cudaMemcpyHostToDevice);
-  assert(err == 0); 
-
+  this->verbose = false;
   this->nodes_count = nodes_count; // number of nodes
   this->sum_all_weights = sum_all_weights; // sum all weights in graph
   this->csr_nnz = csr_nnz; //non-zero values in compressed matrix
@@ -43,11 +45,7 @@ GPUCommunity::GPUCommunity (int* array_host_, int length_, const int nodes_count
   this->csr_data = csr_data;
   this->csr_indices = csr_indices;
   this->csr_indptr = csr_indptr;
-
-  printf("[+]State inited to:================\n");
-  printState();
   
-
   // nodes community assignments
   if (cudaSuccess != cudaMalloc((void**)&d_node_communities, sizeof(int)*nodes_count)) {fprintf(stderr, "ERROR: could not allocate community memory\n"); exit(-1);}
   
@@ -68,58 +66,54 @@ GPUCommunity::GPUCommunity (int* array_host_, int length_, const int nodes_count
   // size of number of rows + 1 because nnz is at the end
   if (cudaSuccess != cudaMalloc((void**)&d_csr_indptr, sizeof(int)*(csr_num_rows+1))) {fprintf(stderr, "ERROR: could not allocate CSR data in memory\n"); exit(-1);}
 
-  // shared sum of all link weights
+  // shared sum of all link weights. TODO: remove this?
   if (cudaSuccess != cudaMalloc((void**)&d_sum_all_weights, sizeof(int))) {fprintf(stderr, "ERROR: could not allocate graph state memory\n"); exit(-1);}
   
-}
-
-void GPUCommunity::increment() {
-  kernel_add_one<<<64, 64>>>(array_device, length);
-  cudaError_t err = cudaGetLastError();
-  assert(err == 0);
 }
 
 void GPUCommunity::printState() {
   
     printf("[+]Nodes count: %d\n",nodes_count);
-//    printf("csr_nnz: %d:\n",csr_nnz);
-//    printf("csr_num_rows: %d\n",csr_num_rows);
-//    printf("sum weights in graph: %d\n",sum_all_weights);
+    printf("csr_nnz: %d:\n",csr_nnz);
+    printf("csr_num_rows: %d\n",csr_num_rows);
+    printf("sum weights in graph: %d\n",sum_all_weights);
 
-    printf("\n[+]Node:community assignments:\n");
-    for (int i = 0; i < nodes_count; i++) {
-        printf("%d:%d, ", i, node_communities[i]);
-    }
+    if (verbose) {
+        printf("\n[+]Node:community assignments:\n");
+        for (int i = 0; i < nodes_count; i++) {
+            printf("%d:%d, ", i, node_communities[i]);
+        }
+        
+        printf("\n[+]Node degrees:\n");
+        for (int i = 0; i < nodes_count; i++) {
+            printf("%d ",this->node_degrees[i]);
+        }
+        
+        printf("\n[+]Sum of weights incident to communities:\n");
+        for (int i = 0; i < nodes_count; i++) {
+            printf("%d ",communities_sum_incidents[i]);
+        }
     
-    printf("\n[+]Node degrees:\n");
-    for (int i = 0; i < nodes_count; i++) {
-        printf("%d ",this->node_degrees[i]);
+        printf("\n[+]Sum of weights internal to community:\n");   
+        for (int i = 0; i < nodes_count; i++) {
+            printf("%d ",communities_sum_inside[i]);
+        }
+        
+        printf("\n[+]CSR data:\n");
+        for (int i = 0; i < csr_nnz; i++) {
+            printf("%d ",csr_data[i]);
+        }
+        printf("\n[+]CSR indices:\n");
+        for (int i = 0; i < csr_nnz; i++) {
+            printf("%d ",csr_indices[i]);
+        }
+        
+        // 0 to nnz+1 because nnz value is appended in indptr array
+        printf("\n[+]CSR index pointer:\n");
+        for (int i = 0; i <= csr_num_rows ; i++) {
+            printf("%d ",csr_indptr[i]);
+        }
     }
-    
-    printf("\n[+]Sum of weights incident to communities:\n");
-    for (int i = 0; i < nodes_count; i++) {
-        printf("%d ",communities_sum_incidents[i]);
-    }
-
-//    printf("\n[+]Sum of weights internal to community:\n");   
-//    for (int i = 0; i < nodes_count; i++) {
-//        printf("%d ",communities_sum_inside[i]);
-//    }
-//    
-//    printf("\n[+]CSR data:\n");
-//    for (int i = 0; i < csr_nnz; i++) {
-//        printf("%d ",csr_data[i]);
-//    }
-//    printf("\n[+]CSR indices:\n");
-//    for (int i = 0; i < csr_nnz; i++) {
-//        printf("%d ",csr_indices[i]);
-//    }
-//    
-//    // 0 to nnz+1 because nnz value is appended in indptr array
-//    printf("\n[+]CSR index pointer:\n");
-//    for (int i = 0; i <= csr_num_rows ; i++) {
-//        printf("%d ",csr_indptr[i]);
-//    }
     
     printf("\n\n");
 
@@ -131,16 +125,15 @@ void GPUCommunity::getMaxDelta (double* max, int* node, int* community) {
     Input: array of communities
     Output: community reassignment that will lead to max delta
     */
-    printf("\n[+]state before getting max delta========\n");
-    printState();
     
     int best_node;
     int* d_best_node;
     int best_community;
     int* d_best_community;
-    double max_delta = 0;
+    double max_delta = 0.;
     double* d_max_delta;
 
+    
     // allocate a global device variables that will hold best node and best corresponding community assignment. These variables are paired and shouldn't be treated separate
     if (cudaSuccess != cudaMalloc((void **)&d_best_node, sizeof(int))) {fprintf(stderr, "ERROR: could not allocate memory\n"); exit(-1);}
 
@@ -149,9 +142,6 @@ void GPUCommunity::getMaxDelta (double* max, int* node, int* community) {
     if (cudaSuccess != cudaMalloc((void **)&d_max_delta, sizeof(double))) {fprintf(stderr, "ERROR: could not allocate memory\n"); exit(-1);}
 
     if (cudaSuccess != cudaMemcpy(d_max_delta, &max_delta, sizeof(double), cudaMemcpyHostToDevice)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
-
-    // TODO: eval if these vals and arrays can be allocated during initialization
-    //if (cudaSuccess != cudaMemcpy(d_sum_all_weights, sum_all_weights, sizeof(int), cudaMemcpyHostToDevice)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
 
     if (cudaSuccess != cudaMemcpy(d_node_degrees, node_degrees, sizeof(int)*nodes_count, cudaMemcpyHostToDevice)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
 
@@ -169,45 +159,27 @@ void GPUCommunity::getMaxDelta (double* max, int* node, int* community) {
 
     if (cudaSuccess != cudaMemcpy(d_communities_sum_inside, communities_sum_inside, sizeof(int)*nodes_count, cudaMemcpyHostToDevice)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
     
-    kernel_compute_max_delta<<<(nodes_count + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, THREADS_PER_BLOCK>>>(nodes_count, d_node_communities, d_node_degrees, d_communities_sum_incidents,  d_communities_sum_inside, csr_nnz, csr_num_rows, d_csr_data, d_csr_indices, d_csr_indptr, sum_all_weights, d_best_node, d_best_community, d_max_delta);
+    kernel_compute_max_delta_b<<<(nodes_count + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, THREADS_PER_BLOCK>>>(nodes_count, d_node_communities, d_node_degrees, d_communities_sum_incidents,  d_communities_sum_inside, csr_nnz, csr_num_rows, d_csr_data, d_csr_indices, d_csr_indptr, sum_all_weights, d_best_node, d_best_community, d_max_delta);
     
-    if (cudaSuccess != cudaMemcpy(&best_node, d_best_node, sizeof(int), cudaMemcpyDeviceToHost)) {fprintf(stderr, "ERROR: copying to host failed\n"); exit(-1);}
+    CheckCuda();
+    
+    if (cudaSuccess != cudaMemcpy(&best_node, d_best_node, sizeof(int), cudaMemcpyDeviceToHost)) {fprintf(stderr, "ERROR: copying best_node to host failed\n"); exit(-1);}
 
-    if (cudaSuccess != cudaMemcpy(&best_community, d_best_community, sizeof(int), cudaMemcpyDeviceToHost)) {fprintf(stderr, "ERROR: copying to device failed\n"); exit(-1);}
+    if (cudaSuccess != cudaMemcpy(&best_community, d_best_community, sizeof(int), cudaMemcpyDeviceToHost)) {fprintf(stderr, "ERROR: copying best_community to host failed\n"); exit(-1);}
     
-    if (cudaSuccess != cudaMemcpy(&max_delta, d_max_delta, sizeof(double), cudaMemcpyDeviceToHost)) {fprintf(stderr, "ERROR: copying to host failed\n"); exit(-1);}
+    if (cudaSuccess != cudaMemcpy(&max_delta, d_max_delta, sizeof(double), cudaMemcpyDeviceToHost)) {fprintf(stderr, "ERROR: copying max_delta to host failed\n"); exit(-1);}
     
     *node = best_node;
     *community = best_community;
-    *max= max_delta; 
-    int i = 16;
-    i++;
+    *max = max_delta; 
 
+    cudaFree(d_best_node);
+    cudaFree(d_best_community);
+    cudaFree(d_max_delta);
 }
 
-void GPUCommunity::setNodeCommunities(int nc[]) {
-    //TODO: This function is not needed since we've updated in py
-    // and the pointer is the same
-    //this->node_communities = nc;
-}
-
-void GPUCommunity::retreive(void) {
-    int size = length * sizeof(int);
-    cudaMemcpy(array_host, array_device, size, cudaMemcpyDeviceToHost);
-    cudaError_t err = cudaGetLastError();
-    if(err != 0) { cout << err << endl; assert(0); }
-}
-
-void GPUCommunity::retreive_to (int* array_host_, int length_) {
-    assert(length == length_);
-    int size = length * sizeof(int);
-    cudaMemcpy(array_host_, array_device, size, cudaMemcpyDeviceToHost);
-    cudaError_t err = cudaGetLastError();
-    assert(err == 0);
-}
 
 GPUCommunity::~GPUCommunity() {
-    cudaFree(array_device);
     cudaFree(d_node_communities);
     cudaFree(d_node_degrees);
     cudaFree(d_communities_sum_incidents);
@@ -216,6 +188,7 @@ GPUCommunity::~GPUCommunity() {
     cudaFree(d_csr_indices);
     cudaFree(d_csr_indptr);
     cudaFree(d_sum_all_weights);
-  
+    printf("[+] CUDA freed!! ;-)\n");
 }
+
 
